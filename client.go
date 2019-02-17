@@ -72,6 +72,9 @@ type Client interface {
 	// to the specified topic.
 	// Returns a token to track delivery of the message to the broker
 	Publish(topic string, qos byte, retained bool, payload interface{}) Token
+	// PublishNonRegisteredEvent will publish the event to the persistent store
+	// incase the client is not yet opened a connection.
+	PublishNonRegisteredEvent(topic string, qos byte, retained bool, payload interface{}) Token
 	// Subscribe starts a new subscription. Provide a MessageHandler to be executed when
 	// a message is published on the topic provided, or nil for the default handler
 	Subscribe(topic string, qos byte, callback MessageHandler) Token
@@ -588,6 +591,40 @@ func (c *client) Publish(topic string, qos byte, retained bool, payload interfac
 		DEBUG.Println(CLI, "sending publish message, topic:", topic)
 		c.obound <- &PacketAndToken{p: pub, t: token}
 	}
+	return token
+}
+
+// PublishNonRegisteredEvent will publish a message to the persistent store
+// when the client is not yet registered.
+func (c *client) PublishNonRegisteredEvent(topic string, qos byte, retained bool, payload interface{}) Token {
+	token := newToken(packets.Publish).(*PublishToken)
+	DEBUG.Println(CLI, "enter Publish")
+
+	pub := packets.NewControlPacket(packets.Publish).(*packets.PublishPacket)
+	pub.Qos = qos
+	pub.TopicName = topic
+	pub.Retain = retained
+	switch payload.(type) {
+	case string:
+		pub.Payload = []byte(payload.(string))
+	case []byte:
+		pub.Payload = payload.([]byte)
+	default:
+		token.err = errors.New("Unknown payload type")
+		token.flowComplete()
+		return token
+	}
+
+	// Open the persistent store for events.
+	c.persist.Open()
+
+	if pub.Qos != 0 && pub.MessageID == 0 {
+		pub.MessageID = c.getAsyncID(token, uint16(len(c.persist.All())+1))
+		token.messageID = pub.MessageID
+	}
+
+	persistOutbound(c.persist, pub)
+
 	return token
 }
 
